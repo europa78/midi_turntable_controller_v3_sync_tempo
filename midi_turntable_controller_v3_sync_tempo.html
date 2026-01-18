@@ -1652,6 +1652,119 @@
     }
 
     // --- BPM estimation (fast, browser-safe, no external libs) ---
+    // Performance optimization (Fix #8): Create Web Worker for non-blocking BPM detection
+    let bpmWorker = null;
+
+    function createBPMWorker() {
+      // Inline Web Worker to avoid blocking the main thread during BPM analysis
+      const workerCode = `
+        // BPM estimation function (runs in worker thread)
+        function estimateBPMFromBuffer(audioBuffer, opts = {}){
+          const bpmMin = opts.bpmMin ?? 60;
+          const bpmMax = opts.bpmMax ?? 200;
+          const maxSeconds = opts.maxSeconds ?? 90;
+
+          const sr = audioBuffer.sampleRate;
+          const nCh = audioBuffer.numberOfChannels;
+          const length = Math.min(audioBuffer.length, Math.floor(maxSeconds * sr));
+
+          // Mixdown to mono (Float32Array)
+          const mono = new Float32Array(length);
+          for (let ch = 0; ch < nCh; ch++){
+            const data = audioBuffer.channelData[ch];
+            for (let i = 0; i < length; i++){
+              mono[i] += data[i] / nCh;
+            }
+          }
+
+          // Downsample by decimation for speed
+          const targetSR = 11025;
+          const step = Math.max(1, Math.round(sr / targetSR));
+          const dsLen = Math.floor(length / step);
+          const ds = new Float32Array(dsLen);
+          for (let i = 0; i < dsLen; i++){
+            ds[i] = mono[i * step];
+          }
+          const dsSR = sr / step;
+
+          // Build an energy envelope (frame-based)
+          const win = 1024;
+          const hop = 512;
+          const envLen = Math.max(1, Math.floor((dsLen - win) / hop));
+          const env = new Float32Array(envLen);
+          for (let i = 0; i < envLen; i++){
+            let sum = 0;
+            const offset = i * hop;
+            for (let j = 0; j < win; j++){
+              const v = ds[offset + j] || 0;
+              sum += v * v;
+            }
+            env[i] = Math.sqrt(sum / win);
+          }
+
+          // Normalize & simple high-pass (remove slow drift)
+          let mean = 0;
+          for (let i = 0; i < envLen; i++) mean += env[i];
+          mean /= envLen;
+          for (let i = 0; i < envLen; i++) env[i] = Math.max(0, env[i] - mean);
+
+          // Smooth (very light)
+          for (let i = 1; i < envLen - 1; i++){
+            env[i] = (env[i-1] + env[i] + env[i+1]) / 3;
+          }
+
+          const envRate = dsSR / hop; // frames per second
+
+          const lagMin = Math.max(1, Math.floor((60 * envRate) / bpmMax));
+          const lagMax = Math.max(lagMin + 1, Math.floor((60 * envRate) / bpmMin));
+          let bestLag = lagMin;
+          let best = -Infinity;
+          let second = -Infinity;
+
+          // Autocorrelation over lag range (small range => fast)
+          for (let lag = lagMin; lag <= lagMax; lag++){
+            let c = 0;
+            for (let i = 0; i < envLen - lag; i++){
+              c += env[i] * env[i + lag];
+            }
+            if (c > best){
+              second = best;
+              best = c;
+              bestLag = lag;
+            } else if (c > second){
+              second = c;
+            }
+          }
+
+          let bpm = (60 * envRate) / bestLag;
+
+          // Normalize common half/double errors into a practical range
+          const normLow = 70, normHigh = 170;
+          while (bpm < normLow) bpm *= 2;
+          while (bpm > normHigh) bpm /= 2;
+
+          // Confidence heuristic
+          const conf = (best <= 0) ? 0 : Math.min(1, (best - (second > 0 ? second : 0)) / best);
+
+          return { bpm, confidence: conf };
+        }
+
+        // Worker message handler
+        self.addEventListener('message', (e) => {
+          const { audioBufferData, opts } = e.data;
+          try {
+            const result = estimateBPMFromBuffer(audioBufferData, opts);
+            self.postMessage({ success: true, result });
+          } catch (error) {
+            self.postMessage({ success: false, error: error.message });
+          }
+        });
+      `;
+
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      return new Worker(URL.createObjectURL(blob));
+    }
+
     function estimateBPMFromBuffer(audioBuffer, opts = {}){
       const bpmMin = opts.bpmMin ?? 60;
       const bpmMax = opts.bpmMax ?? 200;
@@ -1767,6 +1880,9 @@
         this.anchorTime = 0;
         this.visualAngle = 0;
         this.secondsPerRevolution = 1.9; // scratch sensitivity (smaller = faster scrub)
+
+        // Performance optimization: cache previous text to avoid unnecessary DOM updates (Fix #7)
+        this.prevMini2Text = "";
 
         // Hot cues (8 pads)
         this.cues = Array(8).fill(null);
@@ -1920,7 +2036,50 @@
           const ab = await file.arrayBuffer();
           const audioBuffer = await audioCtx.decodeAudioData(ab.slice(0));
 
-          const { bpm, confidence } = estimateBPMFromBuffer(audioBuffer, { bpmMin: 60, bpmMax: 200, maxSeconds: 90 });
+          // Show loading state (Fix #8: Non-blocking BPM detection)
+          this.bpmEl.textContent = "...";
+          this.subEl.textContent = "Analyzing tempo (non-blocking)...";
+
+          // Use Web Worker for non-blocking BPM detection (Fix #8)
+          if (!bpmWorker) {
+            bpmWorker = createBPMWorker();
+          }
+
+          // Prepare audio buffer data for worker (can't transfer AudioBuffer directly)
+          const audioBufferData = {
+            sampleRate: audioBuffer.sampleRate,
+            length: audioBuffer.length,
+            numberOfChannels: audioBuffer.numberOfChannels,
+            channelData: []
+          };
+
+          // Extract channel data
+          for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+            audioBufferData.channelData.push(audioBuffer.getChannelData(ch).slice());
+          }
+
+          // Send to worker and wait for result
+          const result = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("BPM detection timeout")), 30000);
+
+            bpmWorker.onmessage = (e) => {
+              clearTimeout(timeout);
+              if (e.data.success) {
+                resolve(e.data.result);
+              } else {
+                reject(new Error(e.data.error));
+              }
+            };
+
+            bpmWorker.onerror = (e) => {
+              clearTimeout(timeout);
+              reject(new Error("Worker error: " + e.message));
+            };
+
+            bpmWorker.postMessage({ audioBufferData, opts: { bpmMin: 60, bpmMax: 200, maxSeconds: 90 } });
+          });
+
+          const { bpm, confidence } = result;
 
           // Guard against NaN/Infinity
           if (!isFinite(bpm) || bpm <= 0){
@@ -2281,13 +2440,18 @@
         }
         if (this.mini2El){
           const wm = wheelModeSelect.value; // Use cached element (Fix #1)
-          this.mini2El.textContent = (wm === "vinyl" && this.isVinyl) ? "Hold + drag to scratch" : "Hold + drag to nudge";
+          const newText = (wm === "vinyl" && this.isVinyl) ? "Hold + drag to scratch" : "Hold + drag to nudge";
+          // Dirty checking to avoid unnecessary DOM updates (Fix #7)
+          if (newText !== this.prevMini2Text) {
+            this.mini2El.textContent = newText;
+            this.prevMini2Text = newText;
+          }
         }
       }
 
       drawWavePreview(){
-        // Lightweight, no-decoding “waveform”: we generate a deterministic curve
-        // based on the filename so it feels “unique” per track.
+        // Lightweight, no-decoding "waveform": we generate a deterministic curve
+        // based on the filename so it feels "unique" per track.
         const c = this.waveCanvas;
         const ctx = c.getContext("2d");
         const w = c.width, h = c.height;
@@ -2309,10 +2473,16 @@
         ctx.strokeStyle = (this.id === "A") ? "rgba(90,200,250,.9)" : "rgba(191,90,242,.9)";
         ctx.beginPath();
 
+        // Hoist constants out of loop for performance (Fix #4)
+        const hHalf = h / 2;
+        const piMult18 = Math.PI * 18;
+        const hMult030 = h * 0.30;
+        const hMult008 = h * 0.08;
+
         for (let x=0; x<w; x++){
           const t = x / w;
           const amp = 0.15 + 0.85 * Math.pow(rnd(x*0.13), 1.5);
-          const y = h/2 + Math.sin(t * Math.PI * 18) * (h * 0.30 * amp) + (rnd(x*0.7)-0.5) * (h*0.08);
+          const y = hHalf + Math.sin(t * piMult18) * (hMult030 * amp) + (rnd(x*0.7)-0.5) * hMult008;
           if (x===0) ctx.moveTo(x,y);
           else ctx.lineTo(x,y);
         }
@@ -2391,6 +2561,9 @@
 
     // ---------- Animation loop ----------
     let lastT = performance.now();
+    // Cache previous playback rates for dirty checking (Fix #6)
+    let prevRateA = -1, prevRateB = -1;
+
     function tick(now){
       const dt = (now - lastT) / 1000;
       lastT = now;
@@ -2404,16 +2577,25 @@
       deckB.updateVisual(dt);
 
       // Re-assert tempo sync continuously (keeps decks rock-solid locked)
+      // With dirty checking to avoid redundant property sets (Fix #6)
       if (syncState.lockTempo){
         const target = getTargetBPM();
 
         if (deckA.syncEnabled && deckA.detectedBPM){
           const baseA = (target / deckA.detectedBPM) * (syncState.tempoLink ? 1 : (1 + (deckA.pitchPct / 100)));
-          deckA.audio.playbackRate = clamp(baseA * deckA.jogRate, 0.4, 1.6);
+          const newRateA = clamp(baseA * deckA.jogRate, 0.4, 1.6);
+          if (Math.abs(newRateA - prevRateA) > 0.0001) { // Only update if changed
+            deckA.audio.playbackRate = newRateA;
+            prevRateA = newRateA;
+          }
         }
         if (deckB.syncEnabled && deckB.detectedBPM){
           const baseB = (target / deckB.detectedBPM) * (syncState.tempoLink ? 1 : (1 + (deckB.pitchPct / 100)));
-          deckB.audio.playbackRate = clamp(baseB * deckB.jogRate, 0.4, 1.6);
+          const newRateB = clamp(baseB * deckB.jogRate, 0.4, 1.6);
+          if (Math.abs(newRateB - prevRateB) > 0.0001) { // Only update if changed
+            deckB.audio.playbackRate = newRateB;
+            prevRateB = newRateB;
+          }
         }
       }
 
@@ -2450,9 +2632,14 @@
       e.target.value = "";
     });
 
+    // Debounce library search for better performance (Fix #5)
+    let searchTimeout;
     $("#libSearch").addEventListener("input", (e) => {
-      library.query = e.target.value;
-      renderLibrary();
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        library.query = e.target.value;
+        renderLibrary();
+      }, 150); // Wait 150ms after user stops typing
     });
 
     // Drag & drop
