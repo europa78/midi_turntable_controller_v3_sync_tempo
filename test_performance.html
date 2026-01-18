@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Performance Monitor - MIDI Turntable</title>
+  <style>
+    body {
+      font-family: 'Courier New', monospace;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 20px;
+      margin: 0;
+    }
+    .monitor {
+      background: #16213e;
+      border: 2px solid #0f3460;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    h2 {
+      color: #53c9ff;
+      margin-top: 0;
+    }
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px;
+      margin: 5px 0;
+      background: #0f3460;
+      border-radius: 4px;
+    }
+    .label {
+      color: #aaa;
+    }
+    .value {
+      color: #53c9ff;
+      font-weight: bold;
+    }
+    .good { color: #4caf50; }
+    .warning { color: #ff9800; }
+    .bad { color: #f44336; }
+    button {
+      background: #53c9ff;
+      border: none;
+      color: #1a1a2e;
+      padding: 12px 24px;
+      border-radius: 4px;
+      font-size: 16px;
+      cursor: pointer;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #6dd5ff;
+    }
+    .instructions {
+      background: #16213e;
+      border-left: 4px solid #53c9ff;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    iframe {
+      width: 100%;
+      height: 600px;
+      border: 2px solid #0f3460;
+      border-radius: 8px;
+      background: white;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎛️ MIDI Turntable Performance Monitor</h1>
+
+  <div class="instructions">
+    <h3>📊 How to Use This Monitor</h3>
+    <ol>
+      <li>The application is loaded in the iframe below</li>
+      <li>Real-time performance metrics are displayed above</li>
+      <li>Interact with the turntable and watch the metrics</li>
+      <li>Green values = good, Yellow = warning, Red = issues</li>
+    </ol>
+  </div>
+
+  <button onclick="startMonitoring()">▶️ Start Monitoring</button>
+  <button onclick="stopMonitoring()">⏸️ Stop Monitoring</button>
+  <button onclick="resetMetrics()">🔄 Reset Metrics</button>
+
+  <div class="monitor">
+    <h2>⚡ Real-Time Performance</h2>
+    <div class="metric">
+      <span class="label">FPS (Target: 60)</span>
+      <span class="value" id="fps">--</span>
+    </div>
+    <div class="metric">
+      <span class="label">Frame Time (Target: <16.67ms)</span>
+      <span class="value" id="frameTime">--</span>
+    </div>
+    <div class="metric">
+      <span class="label">Memory Usage</span>
+      <span class="value" id="memory">--</span>
+    </div>
+    <div class="metric">
+      <span class="label">Status</span>
+      <span class="value" id="status">Idle</span>
+    </div>
+  </div>
+
+  <div class="monitor">
+    <h2>📈 Statistics</h2>
+    <div class="metric">
+      <span class="label">Average FPS</span>
+      <span class="value" id="avgFps">--</span>
+    </div>
+    <div class="metric">
+      <span class="label">Dropped Frames</span>
+      <span class="value" id="droppedFrames">0</span>
+    </div>
+    <div class="metric">
+      <span class="label">Monitoring Duration</span>
+      <span class="value" id="duration">0s</span>
+    </div>
+  </div>
+
+  <div style="margin-top: 20px;">
+    <h2>🎚️ Application</h2>
+    <iframe id="appFrame" src="midi_turntable_controller_v3_sync_tempo.html"></iframe>
+  </div>
+
+  <script>
+    let monitoring = false;
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let startTime = 0;
+    let droppedFrames = 0;
+    let fpsHistory = [];
+
+    function startMonitoring() {
+      if (monitoring) return;
+      monitoring = true;
+      startTime = performance.now();
+      document.getElementById('status').textContent = 'Monitoring...';
+      document.getElementById('status').className = 'value good';
+      measure();
+    }
+
+    function stopMonitoring() {
+      monitoring = false;
+      document.getElementById('status').textContent = 'Stopped';
+      document.getElementById('status').className = 'value warning';
+    }
+
+    function resetMetrics() {
+      frameCount = 0;
+      droppedFrames = 0;
+      fpsHistory = [];
+      lastTime = performance.now();
+      startTime = performance.now();
+      document.getElementById('avgFps').textContent = '--';
+      document.getElementById('droppedFrames').textContent = '0';
+      document.getElementById('duration').textContent = '0s';
+    }
+
+    function measure() {
+      if (!monitoring) return;
+
+      const now = performance.now();
+      frameCount++;
+
+      // Calculate FPS
+      const elapsed = now - lastTime;
+      if (elapsed >= 1000) {
+        const fps = Math.round((frameCount * 1000) / elapsed);
+        const fpsEl = document.getElementById('fps');
+        fpsEl.textContent = fps;
+
+        if (fps >= 55) {
+          fpsEl.className = 'value good';
+        } else if (fps >= 45) {
+          fpsEl.className = 'value warning';
+        } else {
+          fpsEl.className = 'value bad';
+        }
+
+        fpsHistory.push(fps);
+        if (fpsHistory.length > 60) fpsHistory.shift();
+
+        // Average FPS
+        const avgFps = Math.round(fpsHistory.reduce((a, b) => a + b, 0) / fpsHistory.length);
+        document.getElementById('avgFps').textContent = avgFps;
+
+        // Dropped frames
+        if (fps < 55) {
+          droppedFrames += (60 - fps);
+          document.getElementById('droppedFrames').textContent = droppedFrames;
+        }
+
+        frameCount = 0;
+        lastTime = now;
+      }
+
+      // Frame time
+      const frameTime = elapsed / frameCount;
+      const frameTimeEl = document.getElementById('frameTime');
+      frameTimeEl.textContent = frameTime.toFixed(2) + 'ms';
+
+      if (frameTime < 16.67) {
+        frameTimeEl.className = 'value good';
+      } else if (frameTime < 33.33) {
+        frameTimeEl.className = 'value warning';
+      } else {
+        frameTimeEl.className = 'value bad';
+      }
+
+      // Memory (if available)
+      if (performance.memory) {
+        const usedMB = (performance.memory.usedJSHeapSize / 1048576).toFixed(1);
+        const totalMB = (performance.memory.totalJSHeapSize / 1048576).toFixed(1);
+        document.getElementById('memory').textContent = `${usedMB} / ${totalMB} MB`;
+      }
+
+      // Duration
+      const duration = Math.round((now - startTime) / 1000);
+      document.getElementById('duration').textContent = duration + 's';
+
+      requestAnimationFrame(measure);
+    }
+
+    // Auto-start monitoring
+    setTimeout(() => startMonitoring(), 1000);
+  </script>
+</body>
+</html>
