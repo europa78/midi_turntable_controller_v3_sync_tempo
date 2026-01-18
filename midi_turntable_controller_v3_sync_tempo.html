@@ -526,6 +526,39 @@
       grid-template-columns: repeat(4, 1fr);
       gap:10px;
     }
+    .btn-pad-mode{
+      flex:1;
+      padding:6px 12px;
+      background:rgba(255,255,255,.05);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:6px;
+      color:var(--muted);
+      font-size:11px;
+      font-weight:600;
+      text-transform:uppercase;
+      letter-spacing:.5px;
+      cursor:pointer;
+      transition: all .2s ease;
+    }
+    .btn-pad-mode:hover{
+      background:rgba(255,255,255,.08);
+      border-color:rgba(255,255,255,.15);
+    }
+    .btn-pad-mode.active{
+      background:linear-gradient(135deg, var(--accent), var(--accent-dark));
+      border-color:var(--accent);
+      color:var(--bg);
+      box-shadow:0 4px 12px rgba(212,175,55,.25);
+    }
+    .loop-controls{
+      display:flex;
+      gap:5px;
+      flex-wrap:wrap;
+    }
+    .loop-controls .btn{
+      flex:1;
+      min-width:60px;
+    }
     .pad{
       border-radius:14px;
       border:1px solid rgba(255,255,255,.10);
@@ -1060,6 +1093,18 @@
                 <span>Performance Pads</span>
                 <span class="tiny">Notes 36–43</span>
               </div>
+              <div class="pad-mode-selector" style="margin-bottom: 10px; display: flex; gap: 5px;">
+                <button class="btn-pad-mode active" data-deck="A" data-mode="hotcue">Hot Cue</button>
+                <button class="btn-pad-mode" data-deck="A" data-mode="loop">Loop</button>
+                <button class="btn-pad-mode" data-deck="A" data-mode="oneshot">One-Shot</button>
+              </div>
+              <div class="loop-controls" id="loopControlsA" style="margin-bottom: 10px; display: none;">
+                <button class="btn small" data-action="loop-in" data-deck="A">Loop In</button>
+                <button class="btn small" data-action="loop-out" data-deck="A">Loop Out</button>
+                <button class="btn small" data-action="loop-activate" data-deck="A">Loop ON/OFF</button>
+                <button class="btn small" data-action="loop-half" data-deck="A">½</button>
+                <button class="btn small" data-action="loop-double" data-deck="A">×2</button>
+              </div>
               <div class="pad-grid" id="padsA"></div>
             </div>
           </section>
@@ -1237,6 +1282,18 @@
               <div class="pad-title">
                 <span>Performance Pads</span>
                 <span class="tiny">Notes 44–51</span>
+              </div>
+              <div class="pad-mode-selector" style="margin-bottom: 10px; display: flex; gap: 5px;">
+                <button class="btn-pad-mode active" data-deck="B" data-mode="hotcue">Hot Cue</button>
+                <button class="btn-pad-mode" data-deck="B" data-mode="loop">Loop</button>
+                <button class="btn-pad-mode" data-deck="B" data-mode="oneshot">One-Shot</button>
+              </div>
+              <div class="loop-controls" id="loopControlsB" style="margin-bottom: 10px; display: none;">
+                <button class="btn small" data-action="loop-in" data-deck="B">Loop In</button>
+                <button class="btn small" data-action="loop-out" data-deck="B">Loop Out</button>
+                <button class="btn small" data-action="loop-activate" data-deck="B">Loop ON/OFF</button>
+                <button class="btn small" data-action="loop-half" data-deck="B">½</button>
+                <button class="btn small" data-action="loop-double" data-deck="B">×2</button>
               </div>
               <div class="pad-grid" id="padsB"></div>
             </div>
@@ -1887,6 +1944,19 @@
         // Hot cues (8 pads)
         this.cues = Array(8).fill(null);
 
+        // Loop system
+        this.loopIn = null;
+        this.loopOut = null;
+        this.loopActive = false;
+        this.loopSlots = Array(8).fill(null); // Store loop points for each pad
+
+        // One-shot samples
+        this.oneShotSlots = Array(8).fill(null); // Store sample positions for each pad
+        this.oneShotAudios = Array(8).fill(null); // Separate Audio elements for one-shot playback
+
+        // Pad mode
+        this.padMode = "hotcue"; // "hotcue", "loop", or "oneshot"
+
         // WebAudio nodes (built after initAudio)
         this.srcNode = null;
         this.trimGain = null;         // channel trim
@@ -1931,15 +2001,75 @@
           pad.className = "pad";
           pad.style.background = `linear-gradient(135deg, ${colors[i]}, rgba(255,255,255,.04))`;
           pad.dataset.pad = String(i);
-          pad.innerHTML = `<div class="label">PAD ${i+1}</div><div class="sub">${this.id} • hot-cue</div>`;
+          this.updatePadLabel(i, pad);
           pad.addEventListener("click", () => this.triggerPad(i, pad));
+          // Right-click to clear pad
+          pad.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            this.clearPad(i, pad);
+          });
           this.padsHost.appendChild(pad);
+        }
+      }
+
+      clearPad(i, padEl){
+        // Clear the appropriate pad slot based on current mode
+        if (this.padMode === "hotcue") {
+          this.cues[i] = null;
+        } else if (this.padMode === "loop") {
+          this.loopSlots[i] = null;
+        } else if (this.padMode === "oneshot") {
+          this.oneShotSlots[i] = null;
+          if (this.oneShotAudios[i]) {
+            this.oneShotAudios[i].pause();
+            this.oneShotAudios[i] = null;
+          }
+        }
+        this.updatePadLabel(i, padEl);
+
+        // Visual feedback
+        padEl.classList.add("flash");
+        setTimeout(() => padEl.classList.remove("flash"), 200);
+      }
+
+      updatePadLabel(i, padEl){
+        const modeName = this.padMode === "hotcue" ? "hot-cue" : (this.padMode === "loop" ? "loop" : "one-shot");
+        if (!padEl) {
+          padEl = this.padsHost.querySelector(`[data-pad="${i}"]`);
+        }
+        if (!padEl) return;
+
+        let subText = `${this.id} • ${modeName}`;
+
+        if (this.padMode === "hotcue" && this.cues[i] != null) {
+          subText = `${this.id} • set @ ${fmtTime(this.cues[i])}`;
+        } else if (this.padMode === "loop" && this.loopSlots[i] != null) {
+          const loop = this.loopSlots[i];
+          const len = loop.out - loop.in;
+          subText = `${this.id} • ${len.toFixed(2)}s loop`;
+        } else if (this.padMode === "oneshot" && this.oneShotSlots[i] != null) {
+          subText = `${this.id} • ${fmtTime(this.oneShotSlots[i])}`;
+        }
+
+        padEl.innerHTML = `<div class="label">PAD ${i+1}</div><div class="sub">${subText}</div>`;
+      }
+
+      updateAllPadLabels(){
+        for (let i = 0; i < 8; i++) {
+          this.updatePadLabel(i);
         }
       }
 
       attachAudioEvents(){
         this.audio.addEventListener("timeupdate", () => {
           this.timeEl.textContent = fmtTime(this.audio.currentTime);
+
+          // Loop monitoring - jump back to loop start when reaching loop end
+          if (this.loopActive && this.loopIn != null && this.loopOut != null) {
+            if (this.audio.currentTime >= this.loopOut) {
+              this.audio.currentTime = this.loopIn;
+            }
+          }
         });
         this.audio.addEventListener("play", () => {
           this.subEl.textContent = this.isVinyl ? "Playing (Vinyl scratch enabled)" : "Playing (Jog wheel mode)";
@@ -1950,6 +2080,60 @@
         this.audio.addEventListener("ended", () => {
           this.subEl.textContent = "Ended • press Cue or Play";
         });
+      }
+
+      // Loop control methods
+      setLoopIn(){
+        this.loopIn = this.audio.currentTime;
+        this.subEl.textContent = `Loop IN set @ ${fmtTime(this.loopIn)}`;
+      }
+
+      setLoopOut(){
+        this.loopOut = this.audio.currentTime;
+        if (this.loopIn != null && this.loopOut > this.loopIn) {
+          const len = this.loopOut - this.loopIn;
+          this.subEl.textContent = `Loop OUT set @ ${fmtTime(this.loopOut)} (${len.toFixed(2)}s loop)`;
+        } else {
+          this.subEl.textContent = `Loop OUT set @ ${fmtTime(this.loopOut)}`;
+        }
+      }
+
+      toggleLoop(){
+        if (this.loopIn != null && this.loopOut != null && this.loopOut > this.loopIn) {
+          this.loopActive = !this.loopActive;
+          if (this.loopActive) {
+            this.subEl.textContent = `Loop ACTIVE (${(this.loopOut - this.loopIn).toFixed(2)}s)`;
+            // Jump to loop start if outside loop
+            if (this.audio.currentTime < this.loopIn || this.audio.currentTime > this.loopOut) {
+              this.audio.currentTime = this.loopIn;
+            }
+          } else {
+            this.subEl.textContent = `Loop OFF`;
+          }
+        } else {
+          this.subEl.textContent = "Set Loop IN and OUT points first";
+        }
+      }
+
+      halveLoop(){
+        if (this.loopIn != null && this.loopOut != null && this.loopOut > this.loopIn) {
+          const currentLen = this.loopOut - this.loopIn;
+          const newLen = currentLen / 2;
+          if (newLen >= 0.1) { // Minimum 0.1 second loop
+            this.loopOut = this.loopIn + newLen;
+            this.subEl.textContent = `Loop halved: ${newLen.toFixed(2)}s`;
+          }
+        }
+      }
+
+      doubleLoop(){
+        if (this.loopIn != null && this.loopOut != null && this.loopOut > this.loopIn) {
+          const currentLen = this.loopOut - this.loopIn;
+          const newLen = currentLen * 2;
+          const maxOut = Math.min(this.loopIn + newLen, this.audio.duration || 999);
+          this.loopOut = maxOut;
+          this.subEl.textContent = `Loop doubled: ${(this.loopOut - this.loopIn).toFixed(2)}s`;
+        }
       }
 
       ensureNodes(){
@@ -2290,27 +2474,90 @@
         if (!audioCtx) return;
         this.ensureNodes();
 
-        // Hot-cue:
-        //  - first press sets cue
-        //  - later presses jump to cue
-        if (this.cues[i] == null) {
-          this.cues[i] = this.audio.currentTime;
-          padEl.querySelector(".sub").textContent = `${this.id} • set @ ${fmtTime(this.cues[i])}`;
-        } else {
-          this.audio.currentTime = this.cues[i];
-          this.timeEl.textContent = fmtTime(this.audio.currentTime);
+        if (this.padMode === "hotcue") {
+          // Hot-cue: first press sets cue, later presses jump to cue
+          if (this.cues[i] == null) {
+            this.cues[i] = this.audio.currentTime;
+          } else {
+            this.audio.currentTime = this.cues[i];
+            this.timeEl.textContent = fmtTime(this.audio.currentTime);
+          }
+          this.updatePadLabel(i, padEl);
+        }
+        else if (this.padMode === "loop") {
+          // Loop: first press sets loop points, later presses activate the loop
+          if (this.loopSlots[i] == null) {
+            // Set loop points: use current manual loop in/out or create a 4-beat default
+            if (this.loopIn != null && this.loopOut != null && this.loopOut > this.loopIn) {
+              this.loopSlots[i] = { in: this.loopIn, out: this.loopOut };
+            } else {
+              // Default: 4-beat loop (estimate based on BPM or use 2 seconds)
+              const loopLen = this.detectedBPM ? (4 * 60 / this.detectedBPM) : 2.0;
+              this.loopSlots[i] = {
+                in: this.audio.currentTime,
+                out: Math.min(this.audio.currentTime + loopLen, this.audio.duration || 999)
+              };
+            }
+          } else {
+            // Activate this loop
+            const loop = this.loopSlots[i];
+            this.loopIn = loop.in;
+            this.loopOut = loop.out;
+            this.loopActive = true;
+            this.audio.currentTime = loop.in;
+            if (this.audio.paused) this.audio.play();
+          }
+          this.updatePadLabel(i, padEl);
+        }
+        else if (this.padMode === "oneshot") {
+          // One-shot: first press sets sample start point, later presses trigger playback
+          if (this.oneShotSlots[i] == null) {
+            this.oneShotSlots[i] = this.audio.currentTime;
+          } else {
+            // Trigger one-shot playback
+            this.playOneShot(i);
+          }
+          this.updatePadLabel(i, padEl);
         }
 
         // Visual feedback
         padEl.classList.remove("flash");
-        // force reflow so the animation can retrigger
-        void padEl.offsetWidth;
+        void padEl.offsetWidth; // force reflow
         padEl.classList.add("flash");
 
         // MIDI: pad notes
-        // A pads: 36..43, B pads: 44..51
         const base = this.id === "A" ? 36 : 44;
         midi.sendNote(base + i, 110);
+      }
+
+      playOneShot(i){
+        // Create or reuse Audio element for one-shot playback
+        if (!this.oneShotAudios[i]) {
+          this.oneShotAudios[i] = new Audio();
+          this.oneShotAudios[i].src = this.audio.src;
+          this.oneShotAudios[i].crossOrigin = "anonymous";
+          this.oneShotAudios[i].preload = "auto";
+
+          // Create separate audio chain for one-shot
+          if (audioCtx) {
+            const src = audioCtx.createMediaElementSource(this.oneShotAudios[i]);
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0.8; // Slightly quieter than main deck
+            src.connect(gain);
+            gain.connect(masterGain);
+          }
+        }
+
+        const osAudio = this.oneShotAudios[i];
+        osAudio.currentTime = this.oneShotSlots[i];
+        osAudio.playbackRate = 1.0; // Always play at normal speed
+        osAudio.play();
+
+        // Auto-stop after a short duration (prevent full track playback)
+        const duration = this.detectedBPM ? (1 * 60 / this.detectedBPM) : 1.0; // 1 beat or 1 second
+        setTimeout(() => {
+          osAudio.pause();
+        }, duration * 1000);
       }
 
       // ---- Wheel handling (the "turntable feel") ----
@@ -2728,6 +2975,39 @@
         deck.isVinyl = !deck.isVinyl;
         btn.textContent = deck.isVinyl ? "Vinyl" : "Jog";
         btn.style.opacity = deck.isVinyl ? "1" : ".85";
+      }
+      // Loop controls
+      if (action === "loop-in") deck.setLoopIn();
+      if (action === "loop-out") deck.setLoopOut();
+      if (action === "loop-activate") deck.toggleLoop();
+      if (action === "loop-half") deck.halveLoop();
+      if (action === "loop-double") deck.doubleLoop();
+    });
+
+    // Pad mode selector (delegation)
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest("button.btn-pad-mode");
+      if (!btn) return;
+
+      const deckId = btn.dataset.deck;
+      const mode = btn.dataset.mode;
+      const deck = deckId === "A" ? deckA : deckB;
+
+      // Update active button
+      const siblings = btn.parentElement.querySelectorAll(".btn-pad-mode");
+      siblings.forEach(s => s.classList.remove("active"));
+      btn.classList.add("active");
+
+      // Update deck pad mode
+      deck.padMode = mode;
+      deck.updateAllPadLabels();
+
+      // Show/hide loop controls
+      const loopControls = deckId === "A" ? $("#loopControlsA") : $("#loopControlsB");
+      if (mode === "loop") {
+        loopControls.style.display = "flex";
+      } else {
+        loopControls.style.display = "none";
       }
     });
 
