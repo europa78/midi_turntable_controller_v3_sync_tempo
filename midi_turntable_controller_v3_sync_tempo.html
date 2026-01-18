@@ -562,6 +562,24 @@
       100%{filter:brightness(1)}
     }
 
+    /* Loop pad styling */
+    .pad.loop-pad {
+      border-style: dashed;
+    }
+    .pad.loop-set {
+      border-color: rgba(50,215,75,.7);
+      box-shadow: 0 0 12px rgba(50,215,75,.35), 0 14px 30px rgba(0,0,0,.35);
+    }
+    .pad.loop-active {
+      border-color: rgba(50,215,75,1);
+      box-shadow: 0 0 18px rgba(50,215,75,.55), 0 14px 30px rgba(0,0,0,.35);
+      animation: loopPulse 1s ease-in-out infinite;
+    }
+    @keyframes loopPulse {
+      0%, 100% { filter: brightness(1); }
+      50% { filter: brightness(1.15); }
+    }
+
     /* ---------- Mixer ---------- */
     .mixer{
       display:grid;
@@ -1771,6 +1789,12 @@
         // Hot cues (8 pads)
         this.cues = Array(8).fill(null);
 
+        // Loop functionality
+        this.loopEnabled = false;
+        this.loopIn = null;       // loop start time in seconds
+        this.loopOut = null;      // loop end time in seconds
+        this.autoLoopBars = 4;    // default auto-loop length in bars (1, 2, 4, 8, etc.)
+
         // WebAudio nodes (built after initAudio)
         this.srcNode = null;
         this.trimGain = null;         // channel trim
@@ -1809,13 +1833,26 @@
 
       buildPads(){
         const colors = ["var(--pad1)","var(--pad2)","var(--pad3)","var(--pad4)","var(--pad5)","var(--pad6)","var(--pad7)","var(--pad8)"];
+        // Pads 1-4: Hot cues, Pads 5-8: Loop controls
+        const padLabels = [
+          { label: "CUE 1", sub: `${this.id} • hot-cue` },
+          { label: "CUE 2", sub: `${this.id} • hot-cue` },
+          { label: "CUE 3", sub: `${this.id} • hot-cue` },
+          { label: "CUE 4", sub: `${this.id} • hot-cue` },
+          { label: "LOOP IN", sub: `${this.id} • LOOP IN` },
+          { label: "LOOP OUT", sub: `${this.id} • LOOP OUT` },
+          { label: "LOOP", sub: `${this.id} • LOOP ON/OFF` },
+          { label: "EXIT", sub: `${this.id} • EXIT LOOP` }
+        ];
+
         this.padsHost.innerHTML = "";
         for (let i=0;i<8;i++){
           const pad = document.createElement("button");
           pad.className = "pad";
+          if (i >= 4) pad.classList.add("loop-pad"); // Mark loop pads
           pad.style.background = `linear-gradient(135deg, ${colors[i]}, rgba(255,255,255,.04))`;
           pad.dataset.pad = String(i);
-          pad.innerHTML = `<div class="label">PAD ${i+1}</div><div class="sub">${this.id} • hot-cue</div>`;
+          pad.innerHTML = `<div class="label">${padLabels[i].label}</div><div class="sub">${padLabels[i].sub}</div>`;
           pad.addEventListener("click", () => this.triggerPad(i, pad));
           this.padsHost.appendChild(pad);
         }
@@ -1824,9 +1861,19 @@
       attachAudioEvents(){
         this.audio.addEventListener("timeupdate", () => {
           this.timeEl.textContent = fmtTime(this.audio.currentTime);
+
+          // Handle loop: if loop is enabled and we've passed loopOut, jump back to loopIn
+          if (this.loopEnabled && this.loopIn !== null && this.loopOut !== null) {
+            if (this.audio.currentTime >= this.loopOut) {
+              this.audio.currentTime = this.loopIn;
+            }
+          }
         });
         this.audio.addEventListener("play", () => {
           this.subEl.textContent = this.isVinyl ? "Playing (Vinyl scratch enabled)" : "Playing (Jog wheel mode)";
+          if (this.loopEnabled && this.loopIn !== null && this.loopOut !== null) {
+            this.subEl.textContent += ` [LOOP ${fmtTime(this.loopIn)}-${fmtTime(this.loopOut)}]`;
+          }
         });
         this.audio.addEventListener("pause", () => {
           this.subEl.textContent = "Paused • scratch the wheel, or press Play";
@@ -1894,7 +1941,8 @@
         this.url = URL.createObjectURL(file);
         this.audio.src = this.url;
 
-        this.trackNameEl.textContent = file.name || "Untitled";
+        this.trackName = file.name || "Untitled";
+        this.trackEl.textContent = `Deck ${this.id} • ${this.trackName}`;
         this.subEl.textContent = "Analyzing tempo…";
         this.bpmEl.textContent = "…";
         this.tempoConfidence = 0;
@@ -1904,6 +1952,12 @@
         this.audio.currentTime = 0;
         this.wheelAngle = 0;
         this.lastWheelAngle = 0;
+
+        // Reset loop state when new track is loaded
+        this.loopEnabled = false;
+        this.loopIn = null;
+        this.loopOut = null;
+        this.updateLoopUI();
         this.updateWheelVisual(0);
 
         this.drawWavePreview();
@@ -2131,15 +2185,34 @@
         if (!audioCtx) return;
         this.ensureNodes();
 
-        // Hot-cue:
-        //  - first press sets cue
-        //  - later presses jump to cue
-        if (this.cues[i] == null) {
-          this.cues[i] = this.audio.currentTime;
-          padEl.querySelector(".sub").textContent = `${this.id} • set @ ${fmtTime(this.cues[i])}`;
+        // Pads 0-3: Hot cues, Pads 4-7: Loop controls
+        if (i < 4) {
+          // Hot-cue:
+          //  - first press sets cue
+          //  - later presses jump to cue
+          if (this.cues[i] == null) {
+            this.cues[i] = this.audio.currentTime;
+            padEl.querySelector(".sub").textContent = `${this.id} • set @ ${fmtTime(this.cues[i])}`;
+          } else {
+            this.audio.currentTime = this.cues[i];
+            this.timeEl.textContent = fmtTime(this.audio.currentTime);
+          }
         } else {
-          this.audio.currentTime = this.cues[i];
-          this.timeEl.textContent = fmtTime(this.audio.currentTime);
+          // Loop controls
+          switch(i) {
+            case 4: // Loop In
+              this.setLoopIn();
+              break;
+            case 5: // Loop Out
+              this.setLoopOut();
+              break;
+            case 6: // Loop Toggle
+              this.toggleLoop();
+              break;
+            case 7: // Exit Loop
+              this.exitLoop();
+              break;
+          }
         }
 
         // Visual feedback
@@ -2154,7 +2227,170 @@
         midi.sendNote(base + i, 110);
       }
 
-      // ---- Wheel handling (the “turntable feel”) ----
+      // ---- Loop control methods ----
+      setLoopIn(){
+        if (!audioCtx) return;
+        this.loopIn = this.audio.currentTime;
+        this.updateLoopUI();
+        this.subEl.textContent = `Loop IN set @ ${fmtTime(this.loopIn)}`;
+
+        // MIDI: loop in note
+        const note = this.id === "A" ? 64 : 65;
+        midi.sendNote(note, 100);
+      }
+
+      setLoopOut(){
+        if (!audioCtx) return;
+        if (this.loopIn === null) {
+          this.subEl.textContent = "Set Loop IN first";
+          return;
+        }
+        this.loopOut = this.audio.currentTime;
+
+        // Ensure loopOut > loopIn
+        if (this.loopOut <= this.loopIn) {
+          this.subEl.textContent = "Loop OUT must be after Loop IN";
+          this.loopOut = null;
+          return;
+        }
+
+        this.loopEnabled = true;
+        this.updateLoopUI();
+        this.subEl.textContent = `Loop active: ${fmtTime(this.loopIn)} → ${fmtTime(this.loopOut)}`;
+
+        // MIDI: loop out note
+        const note = this.id === "A" ? 66 : 67;
+        midi.sendNote(note, 100);
+      }
+
+      toggleLoop(){
+        if (this.loopIn === null || this.loopOut === null) {
+          this.subEl.textContent = "Set loop IN and OUT points first";
+          return;
+        }
+        this.loopEnabled = !this.loopEnabled;
+        this.updateLoopUI();
+        this.subEl.textContent = this.loopEnabled
+          ? `Loop ON: ${fmtTime(this.loopIn)} → ${fmtTime(this.loopOut)}`
+          : "Loop OFF";
+
+        // MIDI: loop toggle note
+        const note = this.id === "A" ? 68 : 69;
+        midi.sendNote(note, this.loopEnabled ? 110 : 70);
+      }
+
+      autoLoop(bars = null){
+        if (!audioCtx) return;
+        if (!this.detectedBPM || this.detectedBPM <= 0) {
+          this.subEl.textContent = "Need BPM for auto-loop";
+          return;
+        }
+
+        const numBars = bars ?? this.autoLoopBars;
+        // Calculate loop length: 4 beats per bar, seconds = (bars * 4 * 60) / BPM
+        const beatsPerBar = 4;
+        const loopSeconds = (numBars * beatsPerBar * 60) / this.detectedBPM;
+
+        this.loopIn = this.audio.currentTime;
+        this.loopOut = this.loopIn + loopSeconds;
+
+        // Clamp loopOut to audio duration
+        if (this.audio.duration && this.loopOut > this.audio.duration) {
+          this.loopOut = this.audio.duration;
+        }
+
+        this.loopEnabled = true;
+        this.autoLoopBars = numBars;
+        this.updateLoopUI();
+        this.subEl.textContent = `Auto-loop ${numBars} bar(s): ${fmtTime(this.loopIn)} → ${fmtTime(this.loopOut)}`;
+
+        // MIDI: auto-loop note
+        const note = this.id === "A" ? 70 : 71;
+        midi.sendNote(note, 110);
+      }
+
+      halveLoop(){
+        if (this.loopIn === null || this.loopOut === null) return;
+        const length = this.loopOut - this.loopIn;
+        if (length < 0.1) return; // minimum loop length
+        this.loopOut = this.loopIn + (length / 2);
+        this.autoLoopBars = Math.max(1, Math.floor(this.autoLoopBars / 2));
+        this.updateLoopUI();
+        this.subEl.textContent = `Loop halved: ${fmtTime(this.loopIn)} → ${fmtTime(this.loopOut)}`;
+      }
+
+      doubleLoop(){
+        if (this.loopIn === null || this.loopOut === null) return;
+        const length = this.loopOut - this.loopIn;
+        const newOut = this.loopIn + (length * 2);
+        // Clamp to duration
+        if (this.audio.duration && newOut > this.audio.duration) return;
+        this.loopOut = newOut;
+        this.autoLoopBars = this.autoLoopBars * 2;
+        this.updateLoopUI();
+        this.subEl.textContent = `Loop doubled: ${fmtTime(this.loopIn)} → ${fmtTime(this.loopOut)}`;
+      }
+
+      exitLoop(){
+        this.loopEnabled = false;
+        this.loopIn = null;
+        this.loopOut = null;
+        this.updateLoopUI();
+        this.subEl.textContent = "Loop cleared";
+
+        // MIDI: loop exit note
+        const note = this.id === "A" ? 72 : 73;
+        midi.sendNote(note, 80);
+      }
+
+      updateLoopUI(){
+        // Update pads to show loop status
+        const pads = this.padsHost.querySelectorAll(".pad");
+
+        // Pad 5 (index 4): Loop In
+        if (pads[4]) {
+          const sub = pads[4].querySelector(".sub");
+          if (this.loopIn !== null) {
+            sub.textContent = `IN @ ${fmtTime(this.loopIn)}`;
+            pads[4].classList.add("loop-set");
+          } else {
+            sub.textContent = `${this.id} • LOOP IN`;
+            pads[4].classList.remove("loop-set");
+          }
+        }
+
+        // Pad 6 (index 5): Loop Out
+        if (pads[5]) {
+          const sub = pads[5].querySelector(".sub");
+          if (this.loopOut !== null) {
+            sub.textContent = `OUT @ ${fmtTime(this.loopOut)}`;
+            pads[5].classList.add("loop-set");
+          } else {
+            sub.textContent = `${this.id} • LOOP OUT`;
+            pads[5].classList.remove("loop-set");
+          }
+        }
+
+        // Pad 7 (index 6): Loop toggle
+        if (pads[6]) {
+          const sub = pads[6].querySelector(".sub");
+          if (this.loopEnabled) {
+            sub.textContent = "LOOP ON";
+            pads[6].classList.add("loop-active");
+          } else {
+            sub.textContent = `${this.id} • LOOP ON/OFF`;
+            pads[6].classList.remove("loop-active");
+          }
+        }
+
+        // Pad 8 (index 7): Exit loop
+        if (pads[7]) {
+          const sub = pads[7].querySelector(".sub");
+          sub.textContent = `${this.id} • EXIT LOOP`;
+        }
+      }
+
+      // ---- Wheel handling (the "turntable feel") ----
       attachWheel(){
         // We bind pointer events so touch + mouse both work.
         const el = this.wheelEl;
