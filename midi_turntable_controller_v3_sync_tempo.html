@@ -2154,14 +2154,24 @@
         midi.sendNote(base + i, 110);
       }
 
-      // ---- Wheel handling (the “turntable feel”) ----
+      // ---- Wheel handling (the "turntable feel") ----
       attachWheel(){
         // We bind pointer events so touch + mouse both work.
         const el = this.wheelEl;
+
+        // Cache getBoundingClientRect to avoid layout thrashing (Fix #3)
+        let cachedRect = null;
+        const updateCachedRect = () => {
+          cachedRect = el.getBoundingClientRect();
+        };
+        updateCachedRect(); // Initialize
+
+        // Update on window resize
+        window.addEventListener('resize', updateCachedRect);
+
         const getAngle = (clientX, clientY) => {
-          const r = el.getBoundingClientRect();
-          const cx = r.left + r.width/2;
-          const cy = r.top + r.height/2;
+          const cx = cachedRect.left + cachedRect.width/2;
+          const cy = cachedRect.top + cachedRect.height/2;
           return Math.atan2(clientY - cy, clientX - cx);
         };
 
@@ -2195,11 +2205,11 @@
           const angle = getAngle(e.clientX, e.clientY);
           let delta = angle - this.anchorAngle;
 
-          // Wrap deltas so dragging across the -PI..PI seam doesn’t jump
+          // Wrap deltas so dragging across the -PI..PI seam doesn't jump
           if (delta > Math.PI) delta -= Math.PI*2;
           if (delta < -Math.PI) delta += Math.PI*2;
 
-          const wheelMode = $("#wheelMode").value; // global dropdown: vinyl/jog
+          const wheelMode = wheelModeSelect.value; // Use cached element (Fix #1)
           const effectiveVinyl = (wheelMode === "vinyl") && this.isVinyl;
 
           if (effectiveVinyl){
@@ -2239,7 +2249,7 @@
           this.applyPlaybackRate();
 
           // Resume if we paused for vinyl scratch
-          const wheelMode = $("#wheelMode").value;
+          const wheelMode = wheelModeSelect.value; // Use cached element (Fix #1)
           const effectiveVinyl = (wheelMode === "vinyl") && this.isVinyl;
           if (effectiveVinyl && this.wasPlayingBeforeTouch){
             this.audio.play();
@@ -2254,7 +2264,7 @@
       }
 
       isEffectiveVinylMode(){
-        const wheelMode = $("#wheelMode").value;
+        const wheelMode = wheelModeSelect.value; // Use cached element (Fix #1)
         return (wheelMode === "vinyl") && this.isVinyl;
       }
 
@@ -2263,14 +2273,14 @@
         // Auto-spin when playing (or when not touching in jog mode)
         // We derive rotation from currentTime for consistency.
         if (!this.isTouching){
-          const rps = 0.65 * this.audio.playbackRate;  // “platter feel”
+          const rps = 0.65 * this.audio.playbackRate;  // "platter feel"
           this.visualAngle = (this.audio.currentTime * rps * 360) % 360;
         }
         if (this.rotorEl){
           this.rotorEl.style.transform = `rotate(${this.visualAngle}deg)`;
         }
         if (this.mini2El){
-          const wm = $("#wheelMode").value;
+          const wm = wheelModeSelect.value; // Use cached element (Fix #1)
           this.mini2El.textContent = (wm === "vinyl" && this.isVinyl) ? "Hold + drag to scratch" : "Hold + drag to nudge";
         }
       }
@@ -2318,6 +2328,16 @@
     const deckA = new Deck("A");
     const deckB = new Deck("B");
 
+    // Cache DOM element references for performance (avoid repeated queries in animation loop)
+    const wheelModeSelect = $("#wheelMode");
+    const meterDbEl = $("#meterDb");
+    const barLEl = $("#barL");
+    const barREl = $("#barR");
+    const barPkEl = $("#barPk");
+
+    // Reusable buffer for frequency analysis (avoids per-frame allocation)
+    let meterBuffer = null;
+
     // Init sync UI
     deckA.updateSyncButton();
     deckB.updateSyncButton();
@@ -2346,24 +2366,27 @@
     // ---------- Meter (analyser) ----------
     function updateMeter(){
       if (!analyser) return;
-      const buf = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(buf);
+      // Reuse buffer to avoid per-frame allocation (Fix #2)
+      if (!meterBuffer) {
+        meterBuffer = new Uint8Array(analyser.frequencyBinCount);
+      }
+      analyser.getByteFrequencyData(meterBuffer);
       let sum = 0;
-      for (let i=0;i<buf.length;i++){
-        const v = buf[i] / 255;
+      for (let i=0;i<meterBuffer.length;i++){
+        const v = meterBuffer[i] / 255;
         sum += v*v;
       }
-      const rms = Math.sqrt(sum / buf.length);
+      const rms = Math.sqrt(sum / meterBuffer.length);
       const db = 20 * Math.log10(rms + 1e-6); // approximate
-      $("#meterDb").textContent = isFinite(db) ? db.toFixed(1) + " dB" : "— dB";
+      meterDbEl.textContent = isFinite(db) ? db.toFixed(1) + " dB" : "— dB";
 
       // Map to bar widths
       const l = clamp(rms * 140, 0, 100);
       const r = clamp(rms * 125, 0, 100);
       const pk = clamp((rms * 160) - 10, 0, 100);
-      $("#barL").style.width = l.toFixed(1) + "%";
-      $("#barR").style.width = r.toFixed(1) + "%";
-      $("#barPk").style.width = pk.toFixed(1) + "%";
+      barLEl.style.width = l.toFixed(1) + "%";
+      barREl.style.width = r.toFixed(1) + "%";
+      barPkEl.style.width = pk.toFixed(1) + "%";
     }
 
     // ---------- Animation loop ----------
